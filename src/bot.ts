@@ -373,9 +373,7 @@ I'll notify you when CELO reaches $${targetPrice} 🔔`,
 
     const interval = setInterval(async () => {
       try {
-        const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=celo&vs_currencies=usd");
-        const data = await res.json() as { celo: { usd: number } };
-        const price = data?.celo?.usd;
+        const price = await fetchCeloPrice();
         if (!price) return;
         if (price >= targetPrice) {
           clearInterval(interval);
@@ -425,6 +423,25 @@ TX: \`${tx.hash}\``,
 });
 
 // Helper functions
+async function fetchCeloPrice(): Promise<number | null> {
+  try {
+    const res = await fetch(
+      "https://api.coingecko.com/api/v3/simple/price?ids=celo&vs_currencies=usd&include_24hr_change=true",
+      { headers: { "Accept": "application/json" } }
+    );
+    const text = await res.text();
+    if (text.includes("Throttled") || text.includes("throttled")) {
+      const res2 = await fetch("https://min-api.cryptocompare.com/data/price?fsym=CELO&tsyms=USD");
+      const data2 = await res2.json() as { USD: number };
+      return data2.USD;
+    }
+    const data = JSON.parse(text) as { celo: { usd: number } };
+    return data?.celo?.usd || null;
+  } catch {
+    return null;
+  }
+}
+
 async function sendUserBalance(chatId: number, userId: number) {
   try {
     const result = await getUserBalance(userId);
@@ -447,9 +464,8 @@ async function sendUserPortfolio(chatId: number, userId: number) {
   bot.sendMessage(chatId, "⏳ Loading portfolio...");
   try {
     const result = await getUserBalance(userId);
-    const celoPrice = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=celo&vs_currencies=usd")
-      .then(r => r.json()) as { celo: { usd: number } };
-    const celoUSD = Number(result.CELO) * (celoPrice?.celo?.usd || 0);
+    const price = await fetchCeloPrice();
+    const celoUSD = Number(result.CELO) * (price || 0);
     const totalUSD = Number(result.cUSD) + celoUSD;
     bot.sendMessage(chatId,
 `📊 *Portfolio*
@@ -487,8 +503,23 @@ async function sendBalance(chatId: number, address: string) {
 
 async function sendCeloPrice(chatId: number) {
   try {
-    const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=celo&vs_currencies=usd&include_24hr_change=true");
-    const data = await res.json() as { celo: { usd: number; usd_24h_change: number } };
+    const res = await fetch(
+      "https://api.coingecko.com/api/v3/simple/price?ids=celo&vs_currencies=usd&include_24hr_change=true",
+      { headers: { "Accept": "application/json" } }
+    );
+    const text = await res.text();
+
+    if (text.includes("Throttled") || text.includes("throttled")) {
+      const res2 = await fetch("https://min-api.cryptocompare.com/data/price?fsym=CELO&tsyms=USD");
+      const data2 = await res2.json() as { USD: number };
+      return bot.sendMessage(chatId,
+`📈 *CELO Price*
+
+💵 $${data2.USD.toFixed(4)} USD`,
+      { parse_mode: "Markdown", reply_markup: mainMenu });
+    }
+
+    const data = JSON.parse(text) as { celo: { usd: number; usd_24h_change: number } };
     const price = data?.celo?.usd;
     const change = data?.celo?.usd_24h_change;
     if (!price) throw new Error("Price unavailable");
