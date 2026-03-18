@@ -2,6 +2,7 @@ import TelegramBot from "node-telegram-bot-api";
 import { getBalance } from "./skills/balance";
 import { transferCUSD } from "./skills/transfer";
 import { processAIMessage } from "./skills/ai";
+import { executeSwap, getSwapQuote, SwapDirection } from "./skills/swap";
 import * as dotenv from "dotenv";
 dotenv.config();
 
@@ -29,7 +30,7 @@ bot.onText(/\/start/, (msg) => {
 `👋 Hey ${name}! Welcome to *CeloDefiAgent*
 
 I'm an autonomous DeFi agent on Celo blockchain.
-I can check balances, send cUSD, track portfolios, set price alerts and more.
+I can check balances, send cUSD, swap tokens, track portfolios, set price alerts and more.
 
 Tap a button to get started 👇`,
   { parse_mode: "Markdown", reply_markup: mainMenu });
@@ -47,6 +48,9 @@ bot.onText(/\/help/, (msg) => {
 
 *Transfers*
 /transfer <to> <amount> — Send cUSD
+
+*Swap*
+/swap — Swap CELO ↔ cUSD
 
 *Market*
 /price — CELO live price
@@ -71,6 +75,11 @@ bot.onText(/\/menu/, (msg) => {
 // /price
 bot.onText(/\/price/, async (msg) => {
   await sendCeloPrice(msg.chat.id);
+});
+
+// /swap
+bot.onText(/\/swap/, (msg) => {
+  sendSwapMenu(msg.chat.id);
 });
 
 // /balance (no address)
@@ -181,16 +190,36 @@ bot.on("callback_query", async (query) => {
   }
 
   if (query.data === "swap") {
-    bot.sendMessage(chatId,
-`💱 *Token Swap*
+    sendSwapMenu(chatId);
+  }
 
-Coming soon! I'll be able to swap:
-• CELO → cUSD
-• cUSD → CELO
-• Any Ubeswap pair
+  if (query.data === "swap_celo_cusd" || query.data === "swap_cusd_celo") {
+    const direction = query.data === "swap_celo_cusd" ? "CELO_TO_CUSD" : "CUSD_TO_CELO";
+    const tokenIn = direction === "CELO_TO_CUSD" ? "CELO" : "cUSD";
+    userStates[userId] = { state: "awaiting_swap_amount", data: { direction } };
+    bot.sendMessage(chatId, `💰 How much ${tokenIn} do you want to swap?`);
+  }
 
-Stay tuned 🔜`,
-    { parse_mode: "Markdown", reply_markup: mainMenu });
+  if (query.data?.startsWith("confirm_swap_")) {
+    const parts = query.data.replace("confirm_swap_", "").split("_");
+    const amount = parts.pop()!;
+    const direction = parts.join("_") as SwapDirection;
+    const tokenIn = direction === "CELO_TO_CUSD" ? "CELO" : "cUSD";
+    const tokenOut = direction === "CELO_TO_CUSD" ? "cUSD" : "CELO";
+
+    bot.sendMessage(chatId, `⏳ Swapping ${amount} ${tokenIn} → ${tokenOut}...`);
+
+    try {
+      const result = await executeSwap(direction, amount);
+      bot.sendMessage(chatId,
+`✅ *Swap Complete!*
+
+${amount} ${tokenIn} → ${Number(result.amountOut).toFixed(4)} ${tokenOut}
+TX: \`${result.hash}\``,
+      { parse_mode: "Markdown", reply_markup: mainMenu });
+    } catch (e) {
+      bot.sendMessage(chatId, `❌ Swap failed: ${String(e)}`, { reply_markup: mainMenu });
+    }
   }
 
   if (query.data === "alert") {
@@ -208,12 +237,12 @@ Example: \`0.85\``,
 `*CeloDefiAgent — Button Guide*
 
 💰 *My Balance* — Check your connected wallet
-📊 *Portfolio* — Full portfolio summary
+📊 *Portfolio* — Full portfolio with USD value
 💸 *Send cUSD* — Transfer cUSD step by step
 📈 *CELO Price* — Live price + 24h change
 🔗 *Connect Wallet* — Link your Celo address
 🤖 *Agent Info* — About this agent
-💱 *Swap Tokens* — Swap tokens (coming soon)
+💱 *Swap Tokens* — Swap CELO ↔ cUSD
 🔔 *Price Alert* — Get notified at target price
 🏠 *Home* — Back to main menu
 
@@ -259,6 +288,40 @@ bot.on("message", async (msg) => {
     const to = state.data?.to;
     delete userStates[userId];
     await sendTransfer(chatId, to, amount);
+    return;
+  }
+
+  // State: waiting for swap amount
+  if (state?.state === "awaiting_swap_amount") {
+    const amount = msg.text.trim();
+    const direction = state.data?.direction as SwapDirection;
+    const tokenIn = direction === "CELO_TO_CUSD" ? "CELO" : "cUSD";
+    const tokenOut = direction === "CELO_TO_CUSD" ? "cUSD" : "CELO";
+    delete userStates[userId];
+
+    bot.sendMessage(chatId, `⏳ Getting quote for ${amount} ${tokenIn}...`);
+
+    try {
+      const quote = await getSwapQuote(direction, amount);
+      bot.sendMessage(chatId,
+`💱 *Swap Quote*
+
+${amount} ${tokenIn} → ~${Number(quote).toFixed(4)} ${tokenOut}
+Slippage: 0.5%
+
+Confirm swap?`,
+      {
+        parse_mode: "Markdown",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "✅ Confirm Swap", callback_data: `confirm_swap_${direction}_${amount}` }],
+            [{ text: "❌ Cancel", callback_data: "home" }],
+          ]
+        }
+      });
+    } catch (e) {
+      bot.sendMessage(chatId, `❌ Error getting quote: ${String(e)}`, { reply_markup: mainMenu });
+    }
     return;
   }
 
@@ -400,6 +463,23 @@ ${change >= 0 ? "+" : ""}${change.toFixed(2)}% (24h)`,
   } catch (e) {
     bot.sendMessage(chatId, `❌ Could not fetch price: ${String(e)}`);
   }
+}
+
+function sendSwapMenu(chatId: number) {
+  bot.sendMessage(chatId,
+`💱 *Token Swap*
+
+What would you like to swap?`,
+  {
+    parse_mode: "Markdown",
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "🪙 CELO → 💵 cUSD", callback_data: "swap_celo_cusd" }],
+        [{ text: "💵 cUSD → 🪙 CELO", callback_data: "swap_cusd_celo" }],
+        [{ text: "🔙 Back", callback_data: "home" }],
+      ]
+    }
+  });
 }
 
 function sendAgentInfo(chatId: number) {
