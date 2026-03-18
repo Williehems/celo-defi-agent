@@ -1,24 +1,29 @@
 import TelegramBot from "node-telegram-bot-api";
 import { getBalance } from "./skills/balance";
-import { transferCUSD } from "./skills/transfer";
 import { processAIMessage } from "./skills/ai";
-import { executeSwap, getSwapQuote, SwapDirection } from "./skills/swap";
+import { getSwapQuote } from "./skills/swap";
+import {
+  createUserWallet,
+  importUserWallet,
+  getUserBalance,
+  userTransferCUSD,
+  userSwap,
+} from "./skills/userWallet";
+import { getUserWallet } from "./db";
 import * as dotenv from "dotenv";
 dotenv.config();
 
 const token = process.env.TELEGRAM_BOT_TOKEN as string;
 export const bot = new TelegramBot(token, { polling: true });
 
-// Store user wallets and states
-const userWallets: Record<number, string> = {};
 const userStates: Record<number, { state: string; data?: any }> = {};
 
 const mainMenu = {
   inline_keyboard: [
     [{ text: "💰 My Balance", callback_data: "balance" }, { text: "📊 Portfolio", callback_data: "portfolio" }],
     [{ text: "💸 Send cUSD", callback_data: "send_cusd" }, { text: "📈 CELO Price", callback_data: "price" }],
-    [{ text: "🔗 Connect Wallet", callback_data: "connect" }, { text: "🤖 Agent Info", callback_data: "agent" }],
     [{ text: "💱 Swap Tokens", callback_data: "swap" }, { text: "🔔 Price Alert", callback_data: "alert" }],
+    [{ text: "🔑 My Wallet", callback_data: "my_wallet" }, { text: "🤖 Agent Info", callback_data: "agent" }],
     [{ text: "❓ Help", callback_data: "help" }, { text: "🏠 Home", callback_data: "home" }],
   ]
 };
@@ -26,45 +31,34 @@ const mainMenu = {
 // /start
 bot.onText(/\/start/, (msg) => {
   const name = msg.from?.first_name || "there";
+  const userId = msg.from!.id;
+  const existing = getUserWallet(userId);
+
+  if (existing) {
+    return bot.sendMessage(msg.chat.id,
+`👋 Welcome back ${name}!
+
+Your wallet: \`${existing.address}\`
+
+What would you like to do?`,
+    { parse_mode: "Markdown", reply_markup: mainMenu });
+  }
+
   bot.sendMessage(msg.chat.id,
 `👋 Hey ${name}! Welcome to *CeloDefiAgent*
 
 I'm an autonomous DeFi agent on Celo blockchain.
-I can check balances, send cUSD, swap tokens, track portfolios, set price alerts and more.
 
-Tap a button to get started 👇`,
-  { parse_mode: "Markdown", reply_markup: mainMenu });
-});
-
-// /help
-bot.onText(/\/help/, (msg) => {
-  bot.sendMessage(msg.chat.id,
-`*CeloDefiAgent — All Commands*
-
-*Wallet*
-/connect — Connect your wallet
-/balance — Check your balance
-/balance <address> — Check any address
-
-*Transfers*
-/transfer <to> <amount> — Send cUSD
-
-*Swap*
-/swap — Swap CELO ↔ cUSD
-
-*Market*
-/price — CELO live price
-
-*Portfolio*
-/portfolio — View your portfolio
-
-*Agent*
-/agent — Agent identity & info
-/menu — Show main menu
-
-💬 Or just *chat naturally!*
-Example: _"What's the balance of 0x123?"_`,
-  { parse_mode: "Markdown", reply_markup: mainMenu });
+To get started, set up your wallet:`,
+  {
+    parse_mode: "Markdown",
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "🆕 Create New Wallet", callback_data: "create_wallet" }],
+        [{ text: "📥 Import Existing Wallet", callback_data: "import_wallet" }],
+      ]
+    }
+  });
 });
 
 // /menu
@@ -77,21 +71,9 @@ bot.onText(/\/price/, async (msg) => {
   await sendCeloPrice(msg.chat.id);
 });
 
-// /swap
-bot.onText(/\/swap/, (msg) => {
-  sendSwapMenu(msg.chat.id);
-});
-
-// /balance (no address)
+// /balance
 bot.onText(/\/balance$/, async (msg) => {
-  const wallet = userWallets[msg.from!.id];
-  if (!wallet) {
-    return bot.sendMessage(msg.chat.id,
-      "❌ No wallet connected.\nUse /connect <address> first.",
-      { reply_markup: { inline_keyboard: [[{ text: "🔗 Connect Wallet", callback_data: "connect" }]] } }
-    );
-  }
-  await sendBalance(msg.chat.id, wallet);
+  await sendUserBalance(msg.chat.id, msg.from!.id);
 });
 
 // /balance <address>
@@ -101,43 +83,14 @@ bot.onText(/\/balance (.+)/, async (msg, match) => {
   await sendBalance(msg.chat.id, address);
 });
 
-// /connect <address>
-bot.onText(/\/connect (.+)/, (msg, match) => {
-  const address = match?.[1]?.trim();
-  if (!address || !address.startsWith("0x")) {
-    return bot.sendMessage(msg.chat.id, "❌ Invalid address. Must start with 0x");
-  }
-  userWallets[msg.from!.id] = address;
-  bot.sendMessage(msg.chat.id,
-`✅ *Wallet Connected!*
-\`${address}\`
-
-What would you like to do?`,
-  { parse_mode: "Markdown", reply_markup: mainMenu });
-});
-
-// /transfer
-bot.onText(/\/transfer (.+) (.+)/, async (msg, match) => {
-  const to = match?.[1]?.trim();
-  const amount = match?.[2]?.trim();
-  if (!to || !amount) return;
-  await sendTransfer(msg.chat.id, to, amount);
-});
-
 // /agent
 bot.onText(/\/agent/, (msg) => {
   sendAgentInfo(msg.chat.id);
 });
 
-// /portfolio
-bot.onText(/\/portfolio/, async (msg) => {
-  const wallet = userWallets[msg.from!.id];
-  if (!wallet) {
-    return bot.sendMessage(msg.chat.id, "❌ Connect your wallet first.",
-      { reply_markup: { inline_keyboard: [[{ text: "🔗 Connect Wallet", callback_data: "connect" }]] } }
-    );
-  }
-  await sendPortfolio(msg.chat.id, wallet);
+// /help
+bot.onText(/\/help/, (msg) => {
+  sendHelp(msg.chat.id);
 });
 
 // Handle inline buttons
@@ -150,35 +103,73 @@ bot.on("callback_query", async (query) => {
     bot.sendMessage(chatId, "🏠 Main Menu", { reply_markup: mainMenu });
   }
 
-  if (query.data === "balance") {
-    const wallet = userWallets[userId];
+  if (query.data === "create_wallet") {
+    const { address, privateKey } = createUserWallet(userId);
+    bot.sendMessage(chatId,
+`✅ *Wallet Created!*
+
+📍 Address:
+\`${address}\`
+
+🔑 Private Key (save this now — shown only once):
+\`${privateKey}\`
+
+⚠️ *Never share your private key with anyone.*
+Fund your wallet with CELO or cUSD to get started.`,
+    { parse_mode: "Markdown", reply_markup: mainMenu });
+  }
+
+  if (query.data === "import_wallet") {
+    userStates[userId] = { state: "awaiting_import_key" };
+    bot.sendMessage(chatId,
+`📥 *Import Wallet*
+
+Send me your private key (starts with 0x):
+
+⚠️ This message will not be stored in chat history on our end, but be careful sharing private keys over any messaging app.`,
+    { parse_mode: "Markdown" });
+  }
+
+  if (query.data === "my_wallet") {
+    const wallet = getUserWallet(userId);
     if (!wallet) {
-      return bot.sendMessage(chatId,
-        "❌ No wallet connected yet.\n\nTap below to connect:",
-        { reply_markup: { inline_keyboard: [[{ text: "🔗 Connect Wallet", callback_data: "connect" }]] } }
+      return bot.sendMessage(chatId, "❌ No wallet found.",
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "🆕 Create Wallet", callback_data: "create_wallet" }],
+              [{ text: "📥 Import Wallet", callback_data: "import_wallet" }],
+            ]
+          }
+        }
       );
     }
-    await sendBalance(chatId, wallet);
+    bot.sendMessage(chatId,
+`🔑 *Your Wallet*
+
+📍 Address:
+\`${wallet.address}\`
+
+🔐 Private Key:
+\`${wallet.privateKey}\`
+
+⚠️ Never share your private key.`,
+    { parse_mode: "Markdown", reply_markup: mainMenu });
+  }
+
+  if (query.data === "balance") {
+    await sendUserBalance(chatId, userId);
   }
 
   if (query.data === "portfolio") {
-    const wallet = userWallets[userId];
-    if (!wallet) {
-      return bot.sendMessage(chatId, "❌ Connect your wallet first.",
-        { reply_markup: { inline_keyboard: [[{ text: "🔗 Connect Wallet", callback_data: "connect" }]] } }
-      );
-    }
-    await sendPortfolio(chatId, wallet);
-  }
-
-  if (query.data === "connect") {
-    userStates[userId] = { state: "awaiting_wallet" };
-    bot.sendMessage(chatId, "📝 Send me your Celo wallet address (starts with 0x):");
+    await sendUserPortfolio(chatId, userId);
   }
 
   if (query.data === "send_cusd") {
+    const wallet = getUserWallet(userId);
+    if (!wallet) return sendNoWallet(chatId);
     userStates[userId] = { state: "awaiting_transfer_address" };
-    bot.sendMessage(chatId, "📝 Enter the *recipient's* Celo address:", { parse_mode: "Markdown" });
+    bot.sendMessage(chatId, "📝 Enter recipient's Celo address:");
   }
 
   if (query.data === "price") {
@@ -190,10 +181,14 @@ bot.on("callback_query", async (query) => {
   }
 
   if (query.data === "swap") {
+    const wallet = getUserWallet(userId);
+    if (!wallet) return sendNoWallet(chatId);
     sendSwapMenu(chatId);
   }
 
   if (query.data === "swap_celo_cusd" || query.data === "swap_cusd_celo") {
+    const wallet = getUserWallet(userId);
+    if (!wallet) return sendNoWallet(chatId);
     const direction = query.data === "swap_celo_cusd" ? "CELO_TO_CUSD" : "CUSD_TO_CELO";
     const tokenIn = direction === "CELO_TO_CUSD" ? "CELO" : "cUSD";
     userStates[userId] = { state: "awaiting_swap_amount", data: { direction } };
@@ -203,14 +198,14 @@ bot.on("callback_query", async (query) => {
   if (query.data?.startsWith("confirm_swap_")) {
     const parts = query.data.replace("confirm_swap_", "").split("_");
     const amount = parts.pop()!;
-    const direction = parts.join("_") as SwapDirection;
+    const direction = parts.join("_") as "CELO_TO_CUSD" | "CUSD_TO_CELO";
     const tokenIn = direction === "CELO_TO_CUSD" ? "CELO" : "cUSD";
     const tokenOut = direction === "CELO_TO_CUSD" ? "cUSD" : "CELO";
 
     bot.sendMessage(chatId, `⏳ Swapping ${amount} ${tokenIn} → ${tokenOut}...`);
 
     try {
-      const result = await executeSwap(direction, amount);
+      const result = await userSwap(userId, direction, amount);
       bot.sendMessage(chatId,
 `✅ *Swap Complete!*
 
@@ -227,27 +222,13 @@ TX: \`${result.hash}\``,
     bot.sendMessage(chatId,
 `🔔 *Set Price Alert*
 
-Enter the CELO price you want to be alerted at:
+Enter the CELO price to be alerted at:
 Example: \`0.85\``,
     { parse_mode: "Markdown" });
   }
 
   if (query.data === "help") {
-    bot.sendMessage(chatId,
-`*CeloDefiAgent — Button Guide*
-
-💰 *My Balance* — Check your connected wallet
-📊 *Portfolio* — Full portfolio with USD value
-💸 *Send cUSD* — Transfer cUSD step by step
-📈 *CELO Price* — Live price + 24h change
-🔗 *Connect Wallet* — Link your Celo address
-🤖 *Agent Info* — About this agent
-💱 *Swap Tokens* — Swap CELO ↔ cUSD
-🔔 *Price Alert* — Get notified at target price
-🏠 *Home* — Back to main menu
-
-💬 You can also just *type naturally!*`,
-    { parse_mode: "Markdown", reply_markup: mainMenu });
+    sendHelp(chatId);
   }
 });
 
@@ -258,21 +239,24 @@ bot.on("message", async (msg) => {
   const userId = msg.from!.id;
   const state = userStates[userId];
 
-  // State: waiting for wallet address
-  if (state?.state === "awaiting_wallet") {
-    const address = msg.text.trim();
-    if (!address.startsWith("0x")) {
-      return bot.sendMessage(chatId, "❌ Invalid address. Must start with 0x. Try again:");
+  if (state?.state === "awaiting_import_key") {
+    const privateKey = msg.text.trim();
+    if (!privateKey.startsWith("0x")) {
+      return bot.sendMessage(chatId, "❌ Invalid key. Must start with 0x. Try again:");
     }
-    userWallets[userId] = address;
-    delete userStates[userId];
-    return bot.sendMessage(chatId,
-`✅ *Wallet Connected!*
-\`${address}\``,
-    { parse_mode: "Markdown", reply_markup: mainMenu });
+    try {
+      const { address } = importUserWallet(userId, privateKey);
+      delete userStates[userId];
+      return bot.sendMessage(chatId,
+`✅ *Wallet Imported!*
+
+📍 \`${address}\``,
+      { parse_mode: "Markdown", reply_markup: mainMenu });
+    } catch (e) {
+      return bot.sendMessage(chatId, `❌ Invalid private key: ${String(e)}`);
+    }
   }
 
-  // State: waiting for transfer recipient
   if (state?.state === "awaiting_transfer_address") {
     const address = msg.text.trim();
     if (!address.startsWith("0x")) {
@@ -282,25 +266,34 @@ bot.on("message", async (msg) => {
     return bot.sendMessage(chatId, `💰 How much cUSD do you want to send?`);
   }
 
-  // State: waiting for transfer amount
   if (state?.state === "awaiting_transfer_amount") {
     const amount = msg.text.trim();
     const to = state.data?.to;
     delete userStates[userId];
-    await sendTransfer(chatId, to, amount);
+    bot.sendMessage(chatId, `⏳ Sending ${amount} cUSD...`);
+    try {
+      const result = await userTransferCUSD(userId, to, amount);
+      bot.sendMessage(chatId,
+`✅ *Transfer Complete!*
+
+Amount: *${amount} cUSD*
+To: \`${to}\`
+TX: \`${result.hash}\``,
+      { parse_mode: "Markdown", reply_markup: mainMenu });
+    } catch (e) {
+      bot.sendMessage(chatId, `❌ ${String(e)}`, { reply_markup: mainMenu });
+    }
     return;
   }
 
-  // State: waiting for swap amount
   if (state?.state === "awaiting_swap_amount") {
     const amount = msg.text.trim();
-    const direction = state.data?.direction as SwapDirection;
+    const direction = state.data?.direction as "CELO_TO_CUSD" | "CUSD_TO_CELO";
     const tokenIn = direction === "CELO_TO_CUSD" ? "CELO" : "cUSD";
     const tokenOut = direction === "CELO_TO_CUSD" ? "cUSD" : "CELO";
     delete userStates[userId];
 
     bot.sendMessage(chatId, `⏳ Getting quote for ${amount} ${tokenIn}...`);
-
     try {
       const quote = await getSwapQuote(direction, amount);
       bot.sendMessage(chatId,
@@ -309,7 +302,7 @@ bot.on("message", async (msg) => {
 ${amount} ${tokenIn} → ~${Number(quote).toFixed(4)} ${tokenOut}
 Slippage: 0.5%
 
-Confirm swap?`,
+Confirm?`,
       {
         parse_mode: "Markdown",
         reply_markup: {
@@ -320,24 +313,21 @@ Confirm swap?`,
         }
       });
     } catch (e) {
-      bot.sendMessage(chatId, `❌ Error getting quote: ${String(e)}`, { reply_markup: mainMenu });
+      bot.sendMessage(chatId, `❌ Quote failed: ${String(e)}`, { reply_markup: mainMenu });
     }
     return;
   }
 
-  // State: waiting for alert price
   if (state?.state === "awaiting_alert_price") {
     const targetPrice = parseFloat(msg.text.trim());
     if (isNaN(targetPrice)) {
       return bot.sendMessage(chatId, "❌ Invalid price. Enter a number like 0.85");
     }
     delete userStates[userId];
-
     bot.sendMessage(chatId,
 `✅ *Alert Set!*
 
-I'll notify you when CELO reaches $${targetPrice}
-Checking every 60 seconds... 🔔`,
+I'll notify you when CELO reaches $${targetPrice} 🔔`,
     { parse_mode: "Markdown", reply_markup: mainMenu });
 
     const interval = setInterval(async () => {
@@ -349,10 +339,10 @@ Checking every 60 seconds... 🔔`,
         if (price >= targetPrice) {
           clearInterval(interval);
           bot.sendMessage(chatId,
-`🔔 *Price Alert Triggered!*
+`🔔 *Price Alert!*
 
-CELO has reached *$${price.toFixed(4)}* USD
-Your target was $${targetPrice} 🎯`,
+CELO reached *$${price.toFixed(4)}*
+Your target: $${targetPrice} 🎯`,
           { parse_mode: "Markdown", reply_markup: mainMenu });
         }
       } catch {}
@@ -361,28 +351,32 @@ Your target was $${targetPrice} 🎯`,
   }
 
   // Default: AI chat
+  const wallet = getUserWallet(userId);
   bot.sendMessage(chatId, "🤖 Thinking...");
   try {
-    const result = await processAIMessage(msg.text, userWallets[userId]);
+    const result = await processAIMessage(msg.text, wallet?.address);
 
     if (result.action === "balance") {
-      const address = result.address || userWallets[userId];
-      if (!address) {
-        return bot.sendMessage(chatId, "❌ No address found. Connect your wallet first.",
-          { reply_markup: { inline_keyboard: [[{ text: "🔗 Connect Wallet", callback_data: "connect" }]] } }
-        );
-      }
+      const address = result.address || wallet?.address;
+      if (!address) return bot.sendMessage(chatId, "❌ No wallet found.", { reply_markup: mainMenu });
       await sendBalance(chatId, address);
     } else if (result.action === "transfer") {
       if (!result.to || !result.amount) {
         return bot.sendMessage(chatId, "❌ Please specify address and amount.");
       }
-      await sendTransfer(chatId, result.to, result.amount);
+      if (!wallet) return sendNoWallet(chatId);
+      bot.sendMessage(chatId, `⏳ Sending ${result.amount} cUSD...`);
+      const tx = await userTransferCUSD(userId, result.to, result.amount);
+      bot.sendMessage(chatId,
+`✅ *Transfer Complete!*
+Amount: *${result.amount} cUSD*
+To: \`${result.to}\`
+TX: \`${tx.hash}\``,
+      { parse_mode: "Markdown", reply_markup: mainMenu });
     } else if (result.action === "price") {
       await sendCeloPrice(chatId);
     } else {
-      bot.sendMessage(chatId, result.reply || "I didn't understand that.",
-        { reply_markup: mainMenu });
+      bot.sendMessage(chatId, result.reply || "I didn't understand that.", { reply_markup: mainMenu });
     }
   } catch (e) {
     bot.sendMessage(chatId, `❌ Error: ${String(e)}`);
@@ -390,8 +384,51 @@ Your target was $${targetPrice} 🎯`,
 });
 
 // Helper functions
+async function sendUserBalance(chatId: number, userId: number) {
+  try {
+    const result = await getUserBalance(userId);
+    bot.sendMessage(chatId,
+`💰 *Your Balance*
+
+💵 cUSD: *${Number(result.cUSD).toFixed(4)}*
+🪙 CELO: *${Number(result.CELO).toFixed(4)}*
+
+📍 \`${result.address}\``,
+    { parse_mode: "Markdown", reply_markup: mainMenu });
+  } catch (e) {
+    bot.sendMessage(chatId, `❌ No wallet found. Create one first.`,
+      { reply_markup: { inline_keyboard: [[{ text: "🆕 Create Wallet", callback_data: "create_wallet" }]] } }
+    );
+  }
+}
+
+async function sendUserPortfolio(chatId: number, userId: number) {
+  bot.sendMessage(chatId, "⏳ Loading portfolio...");
+  try {
+    const result = await getUserBalance(userId);
+    const celoPrice = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=celo&vs_currencies=usd")
+      .then(r => r.json()) as { celo: { usd: number } };
+    const celoUSD = Number(result.CELO) * (celoPrice?.celo?.usd || 0);
+    const totalUSD = Number(result.cUSD) + celoUSD;
+    bot.sendMessage(chatId,
+`📊 *Portfolio*
+
+💵 cUSD: *${Number(result.cUSD).toFixed(4)}* ($${Number(result.cUSD).toFixed(2)})
+🪙 CELO: *${Number(result.CELO).toFixed(4)}* ($${celoUSD.toFixed(2)})
+
+💼 Total: *$${totalUSD.toFixed(2)} USD*
+
+📍 \`${result.address}\``,
+    { parse_mode: "Markdown", reply_markup: mainMenu });
+  } catch (e) {
+    bot.sendMessage(chatId, `❌ No wallet found. Create one first.`,
+      { reply_markup: { inline_keyboard: [[{ text: "🆕 Create Wallet", callback_data: "create_wallet" }]] } }
+    );
+  }
+}
+
 async function sendBalance(chatId: number, address: string) {
-  bot.sendMessage(chatId, "⏳ Checking balance...");
+  bot.sendMessage(chatId, "⏳ Checking...");
   try {
     const result = await getBalance(address);
     bot.sendMessage(chatId,
@@ -404,45 +441,6 @@ async function sendBalance(chatId: number, address: string) {
     { parse_mode: "Markdown", reply_markup: mainMenu });
   } catch (e) {
     bot.sendMessage(chatId, `❌ Error: ${String(e)}`);
-  }
-}
-
-async function sendPortfolio(chatId: number, wallet: string) {
-  bot.sendMessage(chatId, "⏳ Loading portfolio...");
-  try {
-    const result = await getBalance(wallet);
-    const celoPrice = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=celo&vs_currencies=usd")
-      .then(r => r.json()) as { celo: { usd: number } };
-    const celoUSD = Number(result.CELO) * (celoPrice?.celo?.usd || 0);
-    const totalUSD = Number(result.cUSD) + celoUSD;
-    bot.sendMessage(chatId,
-`📊 *Portfolio Summary*
-
-💵 cUSD: *${Number(result.cUSD).toFixed(4)}* ($${Number(result.cUSD).toFixed(2)})
-🪙 CELO: *${Number(result.CELO).toFixed(4)}* ($${celoUSD.toFixed(2)})
-
-💼 Total: *$${totalUSD.toFixed(2)} USD*
-
-📍 \`${wallet}\``,
-    { parse_mode: "Markdown", reply_markup: mainMenu });
-  } catch (e) {
-    bot.sendMessage(chatId, `❌ Error: ${String(e)}`);
-  }
-}
-
-async function sendTransfer(chatId: number, to: string, amount: string) {
-  bot.sendMessage(chatId, `⏳ Sending ${amount} cUSD...`);
-  try {
-    const result = await transferCUSD(to, amount);
-    bot.sendMessage(chatId,
-`✅ *Transfer Complete!*
-
-Amount: *${amount} cUSD*
-To: \`${to}\`
-TX: \`${result.hash}\``,
-    { parse_mode: "Markdown", reply_markup: mainMenu });
-  } catch (e) {
-    bot.sendMessage(chatId, `❌ ${String(e)}`);
   }
 }
 
@@ -494,6 +492,38 @@ function sendAgentInfo(chatId: number) {
 
 🌐 https://celo-defi-agent-production.up.railway.app`,
   { parse_mode: "Markdown", reply_markup: mainMenu });
+}
+
+function sendHelp(chatId: number) {
+  bot.sendMessage(chatId,
+`*CeloDefiAgent — Help*
+
+🆕 *Create Wallet* — Generate a new Celo wallet
+📥 *Import Wallet* — Import with private key
+💰 *My Balance* — Check your wallet balance
+📊 *Portfolio* — Full portfolio with USD value
+💸 *Send cUSD* — Transfer cUSD to anyone
+💱 *Swap* — Swap CELO ↔ cUSD on Ubeswap
+📈 *Price* — Live CELO price + 24h change
+🔔 *Alert* — Get notified at target price
+🔑 *My Wallet* — View your address & key
+🤖 *Agent Info* — About this agent
+
+💬 You can also just *type naturally!*`,
+  { parse_mode: "Markdown", reply_markup: mainMenu });
+}
+
+function sendNoWallet(chatId: number) {
+  bot.sendMessage(chatId, "❌ No wallet found. Create one first.",
+    {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "🆕 Create Wallet", callback_data: "create_wallet" }],
+          [{ text: "📥 Import Wallet", callback_data: "import_wallet" }],
+        ]
+      }
+    }
+  );
 }
 
 console.log("🤖 Telegram bot started");
