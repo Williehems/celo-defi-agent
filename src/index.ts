@@ -1,3 +1,4 @@
+import "./bot"
 import "dotenv/config";
 import express from "express";
 import { agentMetadata } from "./wallet";

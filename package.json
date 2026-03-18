@@ -15,11 +15,13 @@
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "node-fetch": "^3.3.2",
+    "node-telegram-bot-api": "^0.67.0",
     "viem": "^2.47.4"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
     "@types/node": "^25.5.0",
+    "@types/node-telegram-bot-api": "^0.64.14",
     "ts-node": "^10.9.2",
     "typescript": "^5.4.5"
   }
