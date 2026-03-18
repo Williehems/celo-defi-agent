@@ -1,3 +1,4 @@
+import { processAIMessage } from "./skills/ai";
 import TelegramBot from "node-telegram-bot-api";
 import { getBalance } from "./skills/balance";
 import { transferCUSD } from "./skills/transfer";
@@ -191,6 +192,66 @@ bot.onText(/\/help/, (msg) => {
 /agent — Agent info
 /help — Show this menu`,
   { parse_mode: "Markdown" });
+});
+// AI chat — handle any plain text message
+bot.on("message", async (msg) => {
+  // Skip commands
+  if (!msg.text || msg.text.startsWith("/")) return;
+
+  const chatId = msg.chat.id;
+  const userId = msg.from!.id;
+  const userWallet = userWallets[userId];
+
+  bot.sendMessage(chatId, "🤖 Thinking...");
+
+  try {
+    const result = await processAIMessage(msg.text, userWallet);
+
+    if (result.action === "balance") {
+      const address = result.address || userWallet;
+      if (!address) {
+        return bot.sendMessage(chatId, "❌ No address found. Connect your wallet with /connect <address>");
+      }
+      const balance = await getBalance(address);
+      bot.sendMessage(chatId,
+`💰 *Balance*
+
+cUSD: *${Number(balance.cUSD).toFixed(4)}*
+CELO: *${Number(balance.CELO).toFixed(4)}*
+
+📍 \`${address}\``,
+      { parse_mode: "Markdown" });
+
+    } else if (result.action === "transfer") {
+      if (!result.to || !result.amount) {
+        return bot.sendMessage(chatId, "❌ Please specify address and amount.\nExample: send 5 cUSD to 0x123...");
+      }
+      bot.sendMessage(chatId, `⏳ Sending ${result.amount} cUSD...`);
+      const tx = await transferCUSD(result.to, result.amount);
+      bot.sendMessage(chatId,
+`✅ *Transfer Complete!*
+
+Amount: *${result.amount} cUSD*
+To: \`${result.to}\`
+TX: \`${tx.hash}\``,
+      { parse_mode: "Markdown" });
+
+    } else if (result.action === "price") {
+      const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=celo&vs_currencies=usd");
+      const data = await res.json() as { celo: { usd: number } };
+      bot.sendMessage(chatId,
+`📈 *CELO Price*
+
+$${data.celo.usd} USD`,
+      { parse_mode: "Markdown" });
+
+    } else {
+      bot.sendMessage(chatId, result.reply || "I didn't understand that. Try /help");
+    }
+
+  } catch (e) {
+    bot.sendMessage(chatId, `❌ Error: ${String(e)}`);
+  }
 });
 
 console.log("🤖 Telegram bot started");
