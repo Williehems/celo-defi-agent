@@ -71,6 +71,13 @@ bot.onText(/\/price/, async (msg) => {
   await sendCeloPrice(msg.chat.id);
 });
 
+// /swap
+bot.onText(/\/swap/, (msg) => {
+  const wallet = getUserWallet(msg.from!.id);
+  if (!wallet) return sendNoWallet(msg.chat.id);
+  sendSwapMenu(msg.chat.id);
+});
+
 // /balance
 bot.onText(/\/balance$/, async (msg) => {
   await sendUserBalance(msg.chat.id, msg.from!.id);
@@ -83,6 +90,17 @@ bot.onText(/\/balance (.+)/, async (msg, match) => {
   await sendBalance(msg.chat.id, address);
 });
 
+// /connect <address> (legacy support)
+bot.onText(/\/connect (.+)/, (msg, match) => {
+  const address = match?.[1]?.trim();
+  if (!address || !address.startsWith("0x")) {
+    return bot.sendMessage(msg.chat.id, "❌ Invalid address. Must start with 0x");
+  }
+  bot.sendMessage(msg.chat.id,
+`ℹ️ To use your own wallet, tap *Import Wallet* and enter your private key.`,
+  { parse_mode: "Markdown", reply_markup: mainMenu });
+});
+
 // /agent
 bot.onText(/\/agent/, (msg) => {
   sendAgentInfo(msg.chat.id);
@@ -91,6 +109,11 @@ bot.onText(/\/agent/, (msg) => {
 // /help
 bot.onText(/\/help/, (msg) => {
   sendHelp(msg.chat.id);
+});
+
+// /portfolio
+bot.onText(/\/portfolio/, async (msg) => {
+  await sendUserPortfolio(msg.chat.id, msg.from!.id);
 });
 
 // Handle inline buttons
@@ -111,7 +134,7 @@ bot.on("callback_query", async (query) => {
 📍 Address:
 \`${address}\`
 
-🔑 Private Key (save this now — shown only once):
+🔑 Private Key (save this now — shown only once here):
 \`${privateKey}\`
 
 ⚠️ *Never share your private key with anyone.*
@@ -126,7 +149,7 @@ Fund your wallet with CELO or cUSD to get started.`,
 
 Send me your private key (starts with 0x):
 
-⚠️ This message will not be stored in chat history on our end, but be careful sharing private keys over any messaging app.`,
+⚠️ Be careful sharing private keys over any messaging app.`,
     { parse_mode: "Markdown" });
   }
 
@@ -145,15 +168,34 @@ Send me your private key (starts with 0x):
       );
     }
     bot.sendMessage(chatId,
-`🔑 *Your Wallet*
+`🔑 *My Wallet*
 
 📍 Address:
 \`${wallet.address}\`
 
-🔐 Private Key:
+Do you want to reveal your private key?
+⚠️ Only do this in a private chat.`,
+    {
+      parse_mode: "Markdown",
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "🔓 Reveal Private Key", callback_data: "reveal_key" }],
+          [{ text: "🔙 Back", callback_data: "home" }],
+        ]
+      }
+    });
+  }
+
+  if (query.data === "reveal_key") {
+    const wallet = getUserWallet(userId);
+    if (!wallet) return sendNoWallet(chatId);
+    bot.sendMessage(chatId,
+`🔐 *Your Private Key*
+
 \`${wallet.privateKey}\`
 
-⚠️ Never share your private key.`,
+⚠️ *Never share this with anyone.*
+Delete this message after saving it.`,
     { parse_mode: "Markdown", reply_markup: mainMenu });
   }
 
@@ -395,7 +437,7 @@ async function sendUserBalance(chatId: number, userId: number) {
 
 📍 \`${result.address}\``,
     { parse_mode: "Markdown", reply_markup: mainMenu });
-  } catch (e) {
+  } catch {
     bot.sendMessage(chatId, `❌ No wallet found. Create one first.`,
       { reply_markup: { inline_keyboard: [[{ text: "🆕 Create Wallet", callback_data: "create_wallet" }]] } }
     );
@@ -420,7 +462,7 @@ async function sendUserPortfolio(chatId: number, userId: number) {
 
 📍 \`${result.address}\``,
     { parse_mode: "Markdown", reply_markup: mainMenu });
-  } catch (e) {
+  } catch {
     bot.sendMessage(chatId, `❌ No wallet found. Create one first.`,
       { reply_markup: { inline_keyboard: [[{ text: "🆕 Create Wallet", callback_data: "create_wallet" }]] } }
     );
@@ -506,7 +548,7 @@ function sendHelp(chatId: number) {
 💱 *Swap* — Swap CELO ↔ cUSD on Ubeswap
 📈 *Price* — Live CELO price + 24h change
 🔔 *Alert* — Get notified at target price
-🔑 *My Wallet* — View your address & key
+🔑 *My Wallet* — View address & reveal key
 🤖 *Agent Info* — About this agent
 
 💬 You can also just *type naturally!*`,
