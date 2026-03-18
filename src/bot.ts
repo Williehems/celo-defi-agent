@@ -29,10 +29,10 @@ const mainMenu = {
 };
 
 // /start
-bot.onText(/\/start/, (msg) => {
+bot.onText(/\/start/, async (msg) => {
   const name = msg.from?.first_name || "there";
   const userId = msg.from!.id;
-  const existing = getUserWallet(userId);
+  const existing = await getUserWallet(userId);
 
   if (existing) {
     return bot.sendMessage(msg.chat.id,
@@ -72,8 +72,8 @@ bot.onText(/\/price/, async (msg) => {
 });
 
 // /swap
-bot.onText(/\/swap/, (msg) => {
-  const wallet = getUserWallet(msg.from!.id);
+bot.onText(/\/swap/, async (msg) => {
+  const wallet = await getUserWallet(msg.from!.id);
   if (!wallet) return sendNoWallet(msg.chat.id);
   sendSwapMenu(msg.chat.id);
 });
@@ -88,17 +88,6 @@ bot.onText(/\/balance (.+)/, async (msg, match) => {
   const address = match?.[1]?.trim();
   if (!address) return;
   await sendBalance(msg.chat.id, address);
-});
-
-// /connect <address> (legacy support)
-bot.onText(/\/connect (.+)/, (msg, match) => {
-  const address = match?.[1]?.trim();
-  if (!address || !address.startsWith("0x")) {
-    return bot.sendMessage(msg.chat.id, "❌ Invalid address. Must start with 0x");
-  }
-  bot.sendMessage(msg.chat.id,
-`ℹ️ To use your own wallet, tap *Import Wallet* and enter your private key.`,
-  { parse_mode: "Markdown", reply_markup: mainMenu });
 });
 
 // /agent
@@ -127,7 +116,17 @@ bot.on("callback_query", async (query) => {
   }
 
   if (query.data === "create_wallet") {
-    const { address, privateKey } = createUserWallet(userId);
+    const existing = await getUserWallet(userId);
+    if (existing) {
+      return bot.sendMessage(chatId,
+`⚠️ You already have a wallet connected.
+
+📍 \`${existing.address}\`
+
+Use 🔑 *My Wallet* to view or manage it.`,
+      { parse_mode: "Markdown", reply_markup: mainMenu });
+    }
+    const { address, privateKey } = await createUserWallet(userId);
     bot.sendMessage(chatId,
 `✅ *Wallet Created!*
 
@@ -154,7 +153,7 @@ Send me your private key (starts with 0x):
   }
 
   if (query.data === "my_wallet") {
-    const wallet = getUserWallet(userId);
+    const wallet = await getUserWallet(userId);
     if (!wallet) {
       return bot.sendMessage(chatId, "❌ No wallet found.",
         {
@@ -187,7 +186,7 @@ Do you want to reveal your private key?
   }
 
   if (query.data === "reveal_key") {
-    const wallet = getUserWallet(userId);
+    const wallet = await getUserWallet(userId);
     if (!wallet) return sendNoWallet(chatId);
     bot.sendMessage(chatId,
 `🔐 *Your Private Key*
@@ -208,7 +207,7 @@ Delete this message after saving it.`,
   }
 
   if (query.data === "send_cusd") {
-    const wallet = getUserWallet(userId);
+    const wallet = await getUserWallet(userId);
     if (!wallet) return sendNoWallet(chatId);
     userStates[userId] = { state: "awaiting_transfer_address" };
     bot.sendMessage(chatId, "📝 Enter recipient's Celo address:");
@@ -223,13 +222,13 @@ Delete this message after saving it.`,
   }
 
   if (query.data === "swap") {
-    const wallet = getUserWallet(userId);
+    const wallet = await getUserWallet(userId);
     if (!wallet) return sendNoWallet(chatId);
     sendSwapMenu(chatId);
   }
 
   if (query.data === "swap_celo_cusd" || query.data === "swap_cusd_celo") {
-    const wallet = getUserWallet(userId);
+    const wallet = await getUserWallet(userId);
     if (!wallet) return sendNoWallet(chatId);
     const direction = query.data === "swap_celo_cusd" ? "CELO_TO_CUSD" : "CUSD_TO_CELO";
     const tokenIn = direction === "CELO_TO_CUSD" ? "CELO" : "cUSD";
@@ -287,7 +286,7 @@ bot.on("message", async (msg) => {
       return bot.sendMessage(chatId, "❌ Invalid key. Must start with 0x. Try again:");
     }
     try {
-      const { address } = importUserWallet(userId, privateKey);
+      const { address } = await importUserWallet(userId, privateKey);
       delete userStates[userId];
       return bot.sendMessage(chatId,
 `✅ *Wallet Imported!*
@@ -393,7 +392,7 @@ Your target: $${targetPrice} 🎯`,
   }
 
   // Default: AI chat
-  const wallet = getUserWallet(userId);
+  const wallet = await getUserWallet(userId);
   bot.sendMessage(chatId, "🤖 Thinking...");
   try {
     const result = await processAIMessage(msg.text, wallet?.address);

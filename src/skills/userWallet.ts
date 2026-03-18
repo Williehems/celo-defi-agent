@@ -88,21 +88,21 @@ function getUserClient(privateKey: string) {
   return { account, walletClient, publicClient };
 }
 
-export function createUserWallet(userId: number): { address: string; privateKey: string } {
+export async function createUserWallet(userId: number): Promise<{ address: string; privateKey: string }> {
   const privateKey = generatePrivateKey();
   const account = privateKeyToAccount(privateKey);
-  saveUserWallet(userId, account.address, privateKey);
+  await saveUserWallet(userId, account.address, privateKey);
   return { address: account.address, privateKey };
 }
 
-export function importUserWallet(userId: number, privateKey: string): { address: string } {
+export async function importUserWallet(userId: number, privateKey: string): Promise<{ address: string }> {
   const account = privateKeyToAccount(privateKey as `0x${string}`);
-  saveUserWallet(userId, account.address, privateKey);
+  await saveUserWallet(userId, account.address, privateKey);
   return { address: account.address };
 }
 
 export async function getUserBalance(userId: number) {
-  const wallet = getUserWallet(userId);
+  const wallet = await getUserWallet(userId);
   if (!wallet) throw new Error("No wallet found");
 
   const { publicClient } = getUserClient(wallet.privateKey);
@@ -126,7 +126,7 @@ export async function getUserBalance(userId: number) {
 }
 
 export async function userTransferCUSD(userId: number, to: string, amount: string) {
-  const wallet = getUserWallet(userId);
+  const wallet = await getUserWallet(userId);
   if (!wallet) throw new Error("No wallet found");
 
   const { walletClient, publicClient } = getUserClient(wallet.privateKey);
@@ -147,7 +147,7 @@ export async function userSwap(
   direction: "CELO_TO_CUSD" | "CUSD_TO_CELO",
   amountIn: string
 ) {
-  const wallet = getUserWallet(userId);
+  const wallet = await getUserWallet(userId);
   if (!wallet) throw new Error("No wallet found");
 
   const { walletClient, publicClient, account } = getUserClient(wallet.privateKey);
@@ -157,7 +157,6 @@ export async function userSwap(
   const path = [tokenIn, WETH, tokenOut] as `0x${string}`[];
   const amount = parseUnits(amountIn, 18);
 
-  // Get quote
   const amounts = await publicClient.readContract({
     address: UBESWAP_ROUTER,
     abi: routerABI,
@@ -166,9 +165,8 @@ export async function userSwap(
   });
 
   const amountOut = amounts[amounts.length - 1];
-  const amountOutMin = (amountOut * 995n) / 1000n; // 0.5% slippage
+  const amountOutMin = (amountOut * 995n) / 1000n;
 
-  // Approve
   const allowance = await publicClient.readContract({
     address: tokenIn as `0x${string}`,
     abi: erc20ABI,
@@ -186,7 +184,6 @@ export async function userSwap(
     await publicClient.waitForTransactionReceipt({ hash: approveTx });
   }
 
-  // Swap
   const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 20);
   const hash = await walletClient.writeContract({
     address: UBESWAP_ROUTER as `0x${string}`,
